@@ -4,9 +4,13 @@ import sys
 import threading
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
+
+from speed_test import main
 
 SCRIPT = Path(__file__).with_name("speed_test.py")
 
@@ -64,6 +68,7 @@ class SpeedTestCli(unittest.TestCase):
             result = run_cli(url)
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
         self.assertEqual(lengths, list(range(70_001, 70_011)))
         self.assertEqual(max_active, 1)
         self.assertIn("Запросов: 10", result.stdout)
@@ -72,6 +77,33 @@ class SpeedTestCli(unittest.TestCase):
         speed = float(re.search(r"Скорость скачивания: ([0-9.]+)", result.stdout)[1])
         expected_speed = 700_055 * 8 / (average_ms * 10 * 1000)
         self.assertAlmostEqual(speed, expected_speed, delta=0.03)
+
+    def test_terminal_uses_received_bytes_when_response_size_is_unknown(self):
+        responses = 0
+
+        class Handler(QuietHandler):
+            def do_GET(self):
+                nonlocal responses
+                responses += 1
+                self.send_response(200)
+                self.end_headers()
+                if responses == 1:
+                    time.sleep(0.16)
+                self.wfile.write(b"hello")
+
+        class TerminalBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        stdout, stderr = TerminalBuffer(), TerminalBuffer()
+        with serve(Handler) as url, patch("sys.argv", [str(SCRIPT), url]):
+            with patch.dict("os.environ", {"COLUMNS": "80"}), redirect_stdout(stdout), redirect_stderr(stderr):
+                self.assertEqual(main(), 0)
+
+        self.assertIn("01/10 [>-----------] 5 Б | всего 5 Б", stderr.getvalue())
+        self.assertIn("10/10 [############] 100%", stderr.getvalue())
+        self.assertIn("Скачано: 50 Б", stdout.getvalue())
+        self.assertNotIn("10/10", stdout.getvalue())
 
     def test_truncated_body_fails_without_printing_partial_results(self):
         requests = []
